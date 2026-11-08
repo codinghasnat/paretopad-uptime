@@ -1,0 +1,48 @@
+# Public copy (8 Nov 2026): private-repo Actions are blocked by GitHub billing; public-repo Actions are free.
+# Stage 4 O01 (21 Oct 2026): outage alerting with no extra service. Every 30 minutes this checks
+# the website, Supabase auth, the database (a public read), edge functions and the chat server.
+# Each check gets three tries. If one stays down the run fails and GitHub emails the person who
+# last changed this schedule. Uses only public URLs and the publishable (anon) key, which already
+# ships in the app.
+name: Uptime
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      simulate_outage:
+        description: "Drill only: point the website check at an address that can never resolve so the run fails and alerts. Production is not touched."
+        type: boolean
+        default: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: https://xjtplguwiinygdeqhjok.supabase.co
+      SUPABASE_ANON_KEY: sb_publishable_Bvgt2VO9MEs9ojuWjiz9wQ_x4B-FMpW
+      CHAT_URL: https://proud-presence-production-6d2e.up.railway.app
+    steps:
+      - name: Check services
+        run: |
+          fail=0
+          check() {
+            name="$1"; shift
+            for attempt in 1 2 3; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "$@") || code=000
+              if [ "$code" = "200" ]; then echo "OK   $name"; return 0; fi
+              sleep 20
+            done
+            echo "DOWN $name (last status $code)"; fail=1
+          }
+          if [ "${{ inputs.simulate_outage }}" = "true" ]; then
+            echo "DRILL: simulating a website outage (production is not touched)"
+            check "Website" https://paretopad-uptime-drill.invalid
+          else
+            check "Website" https://paretopad.com
+          fi
+          check "Supabase auth" -H "apikey: $SUPABASE_ANON_KEY" "$SUPABASE_URL/auth/v1/health"
+          check "Database" -H "apikey: $SUPABASE_ANON_KEY" "$SUPABASE_URL/rest/v1/story_catalog?select=story_id&limit=1"
+          check "Edge functions" -X OPTIONS "$SUPABASE_URL/functions/v1/dashboard-read"
+          check "Chat server" "$CHAT_URL/health"
+          exit $fail
